@@ -1,0 +1,145 @@
+CALL gds.graph.create(
+    'myGraph',
+    {
+        Influenza: {
+            label: 'Infected',
+            properties: 'class'
+        }
+    },
+    '*'
+);
+ 
+CALL gds.beta.knn.stream('myGraph', {
+    topK: 1,
+    nodeWeightProperty: 'class',
+    // The following parameters are set to produce a deterministic result
+    randomSeed: 250,
+    concurrency: 1,
+    sampleRate: 1.0,
+    deltaThreshold: 0.0
+})
+YIELD node1, node2, similarity
+RETURN gds.util.asNode(node1).patient AS InfluenzaPatient1, gds.util.asNode(node2).patient AS InfluenzaPatient2, similarity
+ORDER BY similarity DESCENDING, InfluenzaPatient1, InfluenzaPatient2;
+ 
+CALL gds.beta.knn.stats('myGraph', {topK: 1, concurrency: 1, randomSeed: 42, nodeWeightProperty: 'class'})
+YIELD nodesCompared, similarityPairs;
+ 
+CALL gds.beta.knn.mutate('myGraph', {
+    mutateRelationshipType: 'KNN_SIMILAR',
+    mutateProperty: 'KNNscore',
+    topK: 1,
+    randomSeed: 42,
+    concurrency: 1,
+    nodeWeightProperty: 'class'
+})
+YIELD nodesCompared, relationshipsWritten;
+ 
+CALL gds.beta.knn.write('myGraph', {
+    writeRelationshipType: 'KNN_SIMILAR',
+    writeProperty: 'KNNscore',
+    topK: 1,
+    randomSeed: 42,
+    concurrency: 1,
+    nodeWeightProperty: 'class'
+})
+YIELD nodesCompared, relationshipsWritten;
+ 
+
+CALL gds.beta.pipeline.nodeClassification.create('pipe');
+ 
+
+CALL gds.graph.create(
+  'Influenza',
+  'Infected',
+  {
+    KNN_SIMILAR: {
+      orientation: 'UNDIRECTED',
+      properties: 'KNNscore'
+    }
+  },
+  { nodeProperties: ['class','Age','Cough','Malaise','Runnynose','Chill'] }
+)
+CALL gds.fastRP.stream('Influenza',
+  {
+    embeddingDimension: 4,
+    randomSeed: 42
+  }
+)
+YIELD nodeId, embedding;
+
+CALL gds.fastRP.stats('Influenza', { embeddingDimension: 8 })
+YIELD nodeCount
+
+CALL gds.fastRP.mutate(
+  'COVID-19',
+  {
+    embeddingDimension: 8,
+    mutateProperty: 'fastRP'
+  }
+)
+YIELD nodePropertiesWritten;
+
+CALL gds.fastRP.write(
+  'COVID-19',
+  {
+    embeddingDimension: 8,
+    writeProperty: 'fastRP'
+  }
+)
+YIELD nodePropertiesWritten;
+
+
+CALL gds.beta.pipeline.nodeClassification.addNodeProperty('pipe', 'scaleProperties', {
+  nodeProperties: 'Age'
+  scaler: 'Mean',
+  mutateProperty:'ScaledAge'
+})
+YIELD name, nodePropertySteps
+
+
+
+CALL gds.beta.pipeline.nodeClassification.selectFeatures('pipe', ['class','Age','Cough','Malaise','Runnynose','Chill','ScaledAge'])
+YIELD name, featureProperties;
+ 
+CALL gds.beta.pipeline.nodeClassification.configureSplit('pipe', {
+ testFraction: 0.2,
+  validationFolds: 10
+})
+YIELD splitConfig;
+ 
+ CALL gds.alpha.pipeline.nodeClassification.addMLP('pipe', {classWeights: [0.4,0.3,0.3], focusWeight: 0.5})
+YIELD parameterSpace
+
+CALL gds.alpha.pipeline.nodeClassification.configureAutoTuning('pipe', {
+  maxTrials: 2
+}) YIELD autoTuningConfig
+
+
+CALL gds.beta.pipeline.nodeClassification.train.estimate('myGraph', {
+  pipeline: 'pipe',
+  nodeLabels: ['Influenza'],
+  modelName: 'nc-model',
+  targetProperty: 'class',
+  randomSeed: 42,
+  metrics: [ 'ACCURACY','F1_WEIGHTED' ]
+})
+YIELD requiredMemory;
+ 
+CALL gds.beta.pipeline.nodeClassification.train('myGraph', {
+  pipeline: 'pipe',
+  nodeLabels: ['Influenza'],
+  modelName: 'nc-pipeline-model',
+  targetProperty: 'class',
+  randomSeed: 42,
+  metrics: ['ACCURACY','F1_WEIGHTED']
+}) YIELD modelInfo, modelSelectionStats
+RETURN
+  modelInfo.bestParameters AS winningModel,
+  modelInfo.metrics.F1_WEIGHTED.train.avg AS avgTrainScore,
+  modelInfo.metrics.F1_WEIGHTED.outerTrain AS outerTrainScore,
+  modelInfo.metrics.F1_WEIGHTED.test AS testScore,
+  [cand IN modelSelectionStats.modelCandidates | cand.metrics.F1_WEIGHTED.validation.avg] AS validationScores
+
+
+
